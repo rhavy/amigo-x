@@ -7,16 +7,15 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
 import CryptoJS from "crypto-js";
+import JSZip from "jszip";
 
 export default function AdminPage() {
   const [name, setName] = useState("");
   const [participants, setParticipants] = useState<string[]>([]);
   const [loadedFileName, setLoadedFileName] = useState<string | null>(null);
 
-  // 🔒 Chave secreta usada na criptografia
   const secretKey = "amigo-x-secret";
 
-  // ➕ Adiciona um nome
   const handleAdd = () => {
     if (name.trim() && !participants.includes(name.trim())) {
       setParticipants((prev) => [...prev, name.trim()]);
@@ -24,7 +23,6 @@ export default function AdminPage() {
     }
   };
 
-  // 💾 Gera e baixa o JSON
   const handleDownloadJSON = () => {
     const blob = new Blob([JSON.stringify(participants, null, 2)], {
       type: "application/json",
@@ -37,7 +35,6 @@ export default function AdminPage() {
     URL.revokeObjectURL(url);
   };
 
-  // 📂 Carrega um arquivo JSON existente
   const handleLoadFile = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -59,84 +56,17 @@ export default function AdminPage() {
     reader.readAsText(file);
   };
 
-  // ❌ Remove um participante
   const handleRemove = (name: string) => {
     setParticipants((prev) => prev.filter((n) => n !== name));
   };
 
-  // 🔀 Função de sorteio determinístico (mesma entrada → mesmo resultado)
-  const handleDraw = async () => {
-    if (participants.length < 2) {
-      alert("É necessário pelo menos 2 participantes para o sorteio.");
-      return;
-    }
-
-    // Cria uma semente com base na lista (garante resultado fixo)
-    const seed = CryptoJS.SHA256(JSON.stringify(participants)).toString();
-
-    const seededRandom = (seed: string) => {
-      let h = 0;
-      for (let i = 0; i < seed.length; i++) {
-        h = (h * 31 + seed.charCodeAt(i)) % 0xffffffff;
-      }
-      return () => {
-        h = (h * 1664525 + 1013904223) % 0xffffffff;
-        return h / 0xffffffff;
-      };
-    };
-
-    const rand = seededRandom(seed);
-    let shuffled = [...participants];
-    let valid = false;
-    let attempts = 0;
-
-    // Embaralhamento determinístico (Fisher-Yates)
-    const deterministicShuffle = (array: string[]) => {
-      const arr = [...array];
-      for (let i = arr.length - 1; i > 0; i--) {
-        const j = Math.floor(rand() * (i + 1));
-        [arr[i], arr[j]] = [arr[j], arr[i]];
-      }
-      return arr;
-    };
-
-    // Garante que ninguém tire a si mesmo
-    while (!valid && attempts < 1000) {
-      shuffled = deterministicShuffle(participants);
-      valid = shuffled.every((p, i) => p !== participants[i]);
-      attempts++;
-    }
-
-    if (!valid) {
-      alert("Não foi possível gerar um sorteio válido.");
-      return;
-    }
-
-    // Gera PDFs individuais
-    for (let i = 0; i < participants.length; i++) {
-      const giver = participants[i];
-      const receiver = shuffled[i];
-
-      // Criptografa o nome do sorteado
-      const encrypted = CryptoJS.AES.encrypt(receiver, secretKey).toString();
-
-      await generatePDF(giver, encrypted);
-    }
-
-    alert("🎉 Sorteio realizado! PDFs individuais foram baixados.");
-  };
-
-  // 📄 Gera o PDF com nome + sorteado criptografado
-  const generatePDF = async (name: string, encryptedName: string) => {
+  // Função para gerar PDF em memória e retornar Uint8Array
+  const generatePDFBytes = async (name: string, encryptedName: string) => {
     const pdfDoc = await PDFDocument.create();
     const page = pdfDoc.addPage([400, 250]);
     const font = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
-
     const { width, height } = page.getSize();
-    const titleSize = 18;
-    const textSize = 14;
 
-    // Fundo suave
     page.drawRectangle({
       x: 0,
       y: 0,
@@ -145,29 +75,26 @@ export default function AdminPage() {
       color: rgb(0.96, 0.97, 1),
     });
 
-    // Título (sem emoji — evita erro de codificação)
     page.drawText("Amigo X", {
       x: 150,
       y: height - 50,
-      size: titleSize,
+      size: 18,
       font,
       color: rgb(0.2, 0.2, 0.4),
     });
 
-    // Nome do participante
     page.drawText(`Participante: ${name}`, {
       x: 40,
       y: height - 100,
-      size: textSize,
+      size: 14,
       font,
       color: rgb(0, 0, 0),
     });
 
-    // Código do sorteado (criptografado)
     page.drawText("Código do sorteado:", {
       x: 40,
       y: height - 140,
-      size: textSize,
+      size: 14,
       font,
       color: rgb(0.2, 0.2, 0.2),
     });
@@ -181,16 +108,73 @@ export default function AdminPage() {
     });
 
     const pdfBytes = await pdfDoc.save();
-    const blob = new Blob([new Uint8Array(pdfBytes)], {
-      type: "application/pdf",
-    });
+    return new Uint8Array(pdfBytes);
+  };
 
-    const url = URL.createObjectURL(blob);
+  const handleDraw = async () => {
+    if (participants.length < 2) {
+      alert("É necessário pelo menos 2 participantes para o sorteio.");
+      return;
+    }
+
+    // Semente determinística
+    const seed = CryptoJS.SHA256(JSON.stringify(participants)).toString();
+    const seededRandom = (seed: string) => {
+      let h = 0;
+      for (let i = 0; i < seed.length; i++) {
+        h = (h * 31 + seed.charCodeAt(i)) % 0xffffffff;
+      }
+      return () => {
+        h = (h * 1664525 + 1013904223) % 0xffffffff;
+        return h / 0xffffffff;
+      };
+    };
+    const rand = seededRandom(seed);
+
+    const deterministicShuffle = (array: string[]) => {
+      const arr = [...array];
+      for (let i = arr.length - 1; i > 0; i--) {
+        const j = Math.floor(rand() * (i + 1));
+        [arr[i], arr[j]] = [arr[j], arr[i]];
+      }
+      return arr;
+    };
+
+    let shuffled = [...participants];
+    let valid = false;
+    let attempts = 0;
+    while (!valid && attempts < 1000) {
+      shuffled = deterministicShuffle(participants);
+      valid = shuffled.every((p, i) => p !== participants[i]);
+      attempts++;
+    }
+
+    if (!valid) {
+      alert("Não foi possível gerar um sorteio válido.");
+      return;
+    }
+
+    // Cria ZIP
+    const zip = new JSZip();
+
+    for (let i = 0; i < participants.length; i++) {
+      const giver = participants[i];
+      const receiver = shuffled[i];
+      const encrypted = CryptoJS.AES.encrypt(receiver, secretKey).toString();
+
+      const pdfBytes = await generatePDFBytes(giver, encrypted);
+      zip.file(`${giver}_sorteio.pdf`, pdfBytes);
+    }
+
+    const zipBlob = await zip.generateAsync({ type: "blob" });
+    const url = URL.createObjectURL(zipBlob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `${name}_sorteio.pdf`;
+    a.download = "sorteio_amigo-x.zip";
     a.click();
     URL.revokeObjectURL(url);
+
+    alert("🎉 Sorteio realizado! Todos os PDFs foram baixados em um único ZIP.");
   };
 
   return (
